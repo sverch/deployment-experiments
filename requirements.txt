@@ -1,5 +1,0 @@
-boto3
-attrs
-python-packer
-moto
-pytest

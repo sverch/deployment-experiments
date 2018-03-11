@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -euo pipefail
+
+MODE=${1:-not real}
+
+# Simple testing script.
+#
+# Eventually I want to replace this with something more legitimate, like tox,
+# but it looks like it's a non trivial amount of work to get that working with
+# pipenv.
+#
+# Sources:
+# - https://github.com/requests/requests (from author of pipenv)
+# - https://github.com/pypa/sampleproject
+# - https://stackoverflow.com/questions/47227406/pipenv-vs-setup-py
+# - https://docs.pipenv.org/advanced/#tox-automation-project
+# - https://docs.pipenv.org/advanced/#pipfile-vs-setup-py
+# - https://github.com/tox-dev/tox-pipenv
+# - https://tox.readthedocs.io/en/latest/
+# - https://packaging.python.org/tutorials/distributing-packages/
+pipenv install
+env AWS_REGION="us-east-1" PYTHONPATH="${PYTHONPATH:-.}":. pipenv run pytest -m "$MODE" --fulltrace

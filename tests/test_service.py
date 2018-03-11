@@ -1,87 +1,98 @@
 import boto3
+import time
+import pytest
 from moto import mock_ec2, mock_autoscaling, mock_elb, mock_route53
-from deployment_experiments.service import LoadBalancer, Service
-from deployment_experiments.datacenter import DatacenterInventory
+from deployment_experiments.service import LoadBalancer, Service, ServiceDns
+from deployment_experiments.service import NatGatewayService
+from deployment_experiments.datacenter import Datacenter
 from deployment_experiments.virtual_machine import VirtualMachine
-from deployment_experiments.virtual_machine import VirtualMachinePlugin
 import ipaddress
 
 
 @mock_ec2
-@mock_elb
-@mock_autoscaling
-@mock_route53
-def test_service():
-    nginx = VirtualMachinePlugin(
-            "https://github.com/cloud-deployer/plugins/nginx-build",
-            "https://github.com/cloud-deployer/plugins/nginx-runtime")
-    splunk = VirtualMachinePlugin(
-            "https://github.com/cloud-deployer/plugins/splunk-build",
-            "https://github.com/cloud-deployer/plugins/splunk-runtime")
-    newrelic = VirtualMachinePlugin(
-            "https://github.com/cloud-deployer/plugins/newrelic-build",
-            "https://github.com/cloud-deployer/plugins/newrelic-runtime")
-    image = VirtualMachine(plugins=[nginx, splunk, newrelic])
-    lb = LoadBalancer("web-lb", "foo.example.com")
-    web = Service("web", image, lb)
-    lb.add_path(target=web, port=80, intermediates=[])
-    lb.provision()
-    web.provision(colocated_service=lb.name)
+def test_nat_gateway():
+    nat = NatGatewayService()
+    nat.provision("unittest.web-nat")
+    nat.destroy("unittest.web-nat")
 
-    # Try to get them from the DC inventory
-    dc_inventory = DatacenterInventory()
-    dc_ids = dc_inventory.discover()
-    assert len(dc_ids) == 1
+
+def run_service_test():
+    user_data = """#cloud-config
+repo_update: true
+repo_upgrade: all
+
+packages:
+  - nginx
+
+runcmd:
+ - service nginx start"""
+    image = VirtualMachine(user_data=user_data, plugins=[])
+
+    # Create the provisioner objects
+    lb = LoadBalancer()
+    web = Service()
+    dns = ServiceDns()
+
+    # Provision all the resources
+    lb.provision("unittest.web-lb")
+    web.provision("unittest.web", lb.discover("unittest.web-lb")["Id"], image)
+    dns.provision("foo.myexamplesite.com",
+                  lb.discover("unittest.web-lb")["DNSName"])
+
+    # Deal with networking
+    lb.expose("unittest.web-lb")
+    web.allow("unittest.web", "unittest.web-lb")
 
     # Networking
     ec2 = boto3.client("ec2")
+    dc = Datacenter()
+    dc_id = dc.discover("unittest")["Id"]
     subnets = ec2.describe_subnets(Filters=[{
         'Name': 'vpc-id',
-        'Values': [dc_ids[0]]}])
+        'Values': [dc_id]}])
     route_tables = ec2.describe_route_tables(Filters=[{
         'Name': 'vpc-id',
-        'Values': [dc_ids[0]]}])
-    assert len(route_tables["RouteTables"]) == 1
-    route_table = route_tables["RouteTables"][0]
-    assert route_table["Associations"] == []
-    assert len(route_table["Routes"]) == 1
-    assert route_table["Routes"][0]["DestinationCidrBlock"] == "10.0.0.0/16"
-    assert route_table["Associations"] == []
+        'Values': [dc_id]}])
+    assert len(route_tables["RouteTables"]) == 7
     assert len(subnets["Subnets"]) == 6
 
     # AutoScalingGroup
     autoscaling = boto3.client("autoscaling")
     asgs = autoscaling.describe_auto_scaling_groups(
-            AutoScalingGroupNames=["web"])
+            AutoScalingGroupNames=["unittest.web"])
     assert len(asgs["AutoScalingGroups"]) == 1
-    assert asgs["AutoScalingGroups"][0]["AutoScalingGroupName"] == "web"
-    assert asgs["AutoScalingGroups"][0]["LaunchConfigurationName"] == "web"
-    assert len(asgs["AutoScalingGroups"][0]["LoadBalancerNames"]) == 1
-    assert asgs["AutoScalingGroups"][0]["LoadBalancerNames"][0] == "web-lb"
+    asg = asgs["AutoScalingGroups"][0]
+    assert asg["AutoScalingGroupName"] == "unittest.web"
+    assert asg["LaunchConfigurationName"] == "unittest.web"
+    assert len(asg["LoadBalancerNames"]) == 1
+    assert asg["LoadBalancerNames"][0] == "unittest-web-lb"
+    assert web.discover("unittest.web")["Id"] == "unittest.web"
 
     # Load Balancer
     elb = boto3.client("elb")
     load_balancers = [load_balancer for load_balancer in
                       elb.describe_load_balancers()["LoadBalancerDescriptions"]
-                      if load_balancer["LoadBalancerName"] == "web-lb"]
+                      if load_balancer["LoadBalancerName"] == "unittest-web-lb"
+                      ]
     assert len(load_balancers) == 1
-    assert load_balancers[0]["LoadBalancerName"] == "web-lb"
-    lb_dns = load_balancers[0]["DNSName"]
+    assert load_balancers[0]["LoadBalancerName"] == "unittest-web-lb"
 
     # DNS
     route53 = boto3.client("route53")
     hosted_zones = route53.list_hosted_zones()
     assert len(hosted_zones["HostedZones"]) == 1
-    assert hosted_zones["HostedZones"][0]["Name"] == "example.com."
+    assert hosted_zones["HostedZones"][0]["Name"] == "myexamplesite.com."
     zone_id = hosted_zones["HostedZones"][0]["Id"].split("/")[-1]
     resource_record_sets = route53.list_resource_record_sets(
             HostedZoneId=zone_id)
-    assert len(resource_record_sets["ResourceRecordSets"]) == 1
-    resource_record_set = resource_record_sets["ResourceRecordSets"][0]
-    assert resource_record_set["Name"] == "foo.example.com"
-    assert resource_record_set["Type"] == "CNAME"
-    assert len(resource_record_set["ResourceRecords"]) == 1
-    assert resource_record_set["ResourceRecords"][0]["Value"] == lb_dns
+    lb_dns = load_balancers[0]["DNSName"]
+    for resource_record_set in resource_record_sets["ResourceRecordSets"]:
+        if resource_record_set["Type"] == "CNAME":
+            # Need this because moto appends a dot but boto doesn't
+            assert resource_record_set["Name"].startswith(
+                    "foo.myexamplesite.com")
+            assert len(resource_record_set["ResourceRecords"]) == 1
+            assert resource_record_set["ResourceRecords"][0]["Value"] == lb_dns
 
     # Make sure subnets don't overlap
     asg = asgs["AutoScalingGroups"][0]
@@ -120,45 +131,41 @@ def test_service():
 
     assert asg_vpc_id == load_balancer_vpc_id
 
-    # Make sure they are gone when I destroy them
-    lb.destroy()
+    # Give the ASG time to spin up some instances
+    time.sleep(15)
 
-    # DC
-    dc_inventory = DatacenterInventory()
-    dc_ids = dc_inventory.discover()
-    assert len(dc_ids) == 1
+    # Make sure they are gone when I destroy them
+    lb.destroy("unittest.web-lb")
+    dns.destroy("foo.myexamplesite.com")
 
     # Networking
     ec2 = boto3.client("ec2")
     subnets = ec2.describe_subnets(Filters=[{
         'Name': 'vpc-id',
-        'Values': [dc_ids[0]]}])
+        'Values': [dc_id]}])
     route_tables = ec2.describe_route_tables(Filters=[{
         'Name': 'vpc-id',
-        'Values': [dc_ids[0]]}])
-    assert len(route_tables["RouteTables"]) == 1
-    route_table = route_tables["RouteTables"][0]
-    assert route_table["Associations"] == []
-    assert len(route_table["Routes"]) == 1
-    assert route_table["Routes"][0]["DestinationCidrBlock"] == "10.0.0.0/16"
-    assert route_table["Associations"] == []
+        'Values': [dc_id]}])
+    assert len(route_tables["RouteTables"]) == 4
     assert len(subnets["Subnets"]) == 3
 
     # AutoScalingGroup
     autoscaling = boto3.client("autoscaling")
     asgs = autoscaling.describe_auto_scaling_groups(
-            AutoScalingGroupNames=["web"])
+            AutoScalingGroupNames=["unittest.web"])
     assert len(asgs["AutoScalingGroups"]) == 1
-    assert asgs["AutoScalingGroups"][0]["AutoScalingGroupName"] == "web"
-    assert asgs["AutoScalingGroups"][0]["LaunchConfigurationName"] == "web"
-    assert len(asgs["AutoScalingGroups"][0]["LoadBalancerNames"]) == 1
-    assert asgs["AutoScalingGroups"][0]["LoadBalancerNames"][0] == "web-lb"
+    asg = asgs["AutoScalingGroups"][0]
+    assert asg["AutoScalingGroupName"] == "unittest.web"
+    assert asg["LaunchConfigurationName"] == "unittest.web"
+    assert len(asg["LoadBalancerNames"]) == 1
+    assert asg["LoadBalancerNames"][0] == "unittest-web-lb"
 
     # Load Balancer
     elb = boto3.client("elb")
     load_balancers = [load_balancer for load_balancer in
                       elb.describe_load_balancers()["LoadBalancerDescriptions"]
-                      if load_balancer["LoadBalancerName"] == "web-lb"]
+                      if load_balancer["LoadBalancerName"] == "unittest-web-lb"
+                      ]
     assert len(load_balancers) == 0
 
     # DNS
@@ -167,27 +174,42 @@ def test_service():
     assert len(hosted_zones["HostedZones"]) == 0
 
     # Now destroy the rest
-    web.destroy()
+    web.destroy("unittest.web")
 
-    # DC
-    dc_inventory = DatacenterInventory()
-    dc_ids = dc_inventory.discover()
-    assert len(dc_ids) == 0
+    # Give things time to clear in AWS (because apparently things return before
+    # they are actually gone???).
+    # XXX: FIXME: This is bad and the library itself should actually wait.
+    time.sleep(60)
 
     # AutoScalingGroup
     autoscaling = boto3.client("autoscaling")
     asgs = autoscaling.describe_auto_scaling_groups(
-            AutoScalingGroupNames=["web"])
+            AutoScalingGroupNames=["unittest.web"])
     assert len(asgs["AutoScalingGroups"]) == 0
 
     # Load Balancer
     elb = boto3.client("elb")
     load_balancers = [load_balancer for load_balancer in
                       elb.describe_load_balancers()["LoadBalancerDescriptions"]
-                      if load_balancer["LoadBalancerName"] == "web-lb"]
+                      if load_balancer["LoadBalancerName"] == "unittest-web-lb"
+                      ]
     assert len(load_balancers) == 0
 
     # DNS
     route53 = boto3.client("route53")
     hosted_zones = route53.list_hosted_zones()
     assert len(hosted_zones["HostedZones"]) == 0
+
+
+@mock_ec2
+@mock_elb
+@mock_autoscaling
+@mock_route53
+@pytest.mark.mock
+def test_service_mock():
+    run_service_test()
+
+
+@pytest.mark.real
+def test_service_real():
+    run_service_test()

@@ -27,13 +27,11 @@ without anything that a human shouldn't have to think about.
 This depends on pipenv (https://docs.pipenv.org/):
 
 ```
-pipenv install
-pipenv shell
-export PYTHONPATH=$PYTHONPATH:.
-pytest
+./test
 ```
 
-Make sure you also have a default region set, since the tests depend on that.
+Eventually I want to do this using a more standard tool, like tox, but that's
+much more involved.  See the script for more details.
 
 ## Basic Usage
 
@@ -110,3 +108,4 @@ components.
 - https://github.com/juju/juju
 - https://libcloud.apache.org/
 - https://github.com/APIs-guru/openapi-directory
+- https://cloudstack.apache.org/

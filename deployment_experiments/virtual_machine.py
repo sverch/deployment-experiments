@@ -26,7 +26,7 @@ everything is open source).
 """
 
 import attr
-import boto3
+
 
 @attr.s
 class VirtualMachineBuilderInterface(object):
@@ -36,6 +36,7 @@ class VirtualMachineBuilderInterface(object):
     """
     def build_image(self):
         raise NotImplemented
+
 
 @attr.s
 class PackerImageBuilder(VirtualMachineBuilderInterface):
@@ -51,6 +52,7 @@ class PackerImageBuilder(VirtualMachineBuilderInterface):
         # 2. Run Packer
         # 3. Return AMI id
         return "ami-66506c1c"
+
 
 @attr.s
 class AnsibleCloudInitGenerator(object):
@@ -76,10 +78,11 @@ class VirtualMachinePlugin(object):
     run_source = attr.ib()
 
     def build_scripts(self):
-        return { "type": "packer", "contents": self.build_source }
+        return {"type": "packer", "contents": self.build_source}
 
     def runtime_scripts(self):
         return AnsibleCloudInitGenerator(self.run_source).get_runtime_script()
+
 
 @attr.s
 class VirtualMachine(object):
@@ -87,14 +90,15 @@ class VirtualMachine(object):
     An abstraction for a virtual machine, in an attempt to capture the two
     phases of the life of a VM.
 
-    First, there's the build stage, which contains generic scripts needed to set
-    up a machine.  How can I represent this?
+    First, there's the build stage, which contains generic scripts needed to
+    set up a machine.  How can I represent this?
 
     I mean, I could just use packer.  That's specifically designed for this
     purpose.  This could just be a wrapper around packer, or packer could be a
     plugin.
     """
     plugins = attr.ib(type=list)
+    user_data = attr.ib(default=None)
     provider = attr.ib(default="aws")
 
     def build_cloud_init(self):
@@ -102,6 +106,16 @@ class VirtualMachine(object):
         for plugin in self.plugins:
             runtime_scripts.extend(plugin.runtime_scripts())
         return "%cloud-init%".join(runtime_scripts)
+
+    def get_runtime_scripts(self):
+        assert not self.plugins or not self.user_data
+        if self.plugins:
+            return self.build_cloud_init()
+        elif self.user_data:
+            return self.user_data
+        else:
+            # TODO: Be more specific about no user data behavior.
+            return ""
 
     def build(self):
         build_scripts = []

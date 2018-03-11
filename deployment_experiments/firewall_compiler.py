@@ -17,6 +17,7 @@ I think a little.  If only to just change the format.
 
 import attr
 
+
 @attr.s
 class FirewallCompiler(object):
 
