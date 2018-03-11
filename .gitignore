@@ -1,0 +1,7 @@
+*.pyc
+moto
+pytest
+__pycache__
+.pytest_cache
+.cache
+env
