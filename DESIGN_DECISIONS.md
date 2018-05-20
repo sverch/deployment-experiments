@@ -79,3 +79,11 @@ all of Amazon's other random features if I provide that, so really having each
 piece focus on a self contained thing is actually nice (so then what to do
 about VPC dependency violations?  Just friendlier error messaging after trying
 to discover things that might be blocking deletion?).
+
+## (Tentative) Declarative Configuration, Dynamic Resources
+
+This seems like a clear one in retrospect.  Declarative configuration has a
+purpose, in defining what something is.  While this is meant to be more dynamic
+than terraform in that resources are dynamic and not declarative, what those
+resources are could still be declarative.  This parallels a launch configuration
+in an AWS autoscaling group.
